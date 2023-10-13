@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type testPopListener struct {
@@ -973,3 +974,171 @@ func TestLbaasV2_updateServiceAnnotations(t *testing.T) {
 
 	assert.ElementsMatch(t, expectedAnnotations, serviceAnnotations)
 }
+
+func TestBuildBatchUpdateMemberOpts(t *testing.T) {
+	// Sample ServicePort
+	port := corev1.ServicePort{
+		NodePort: 8080,
+	}
+
+	// Sample Nodes
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-1",
+		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{
+					Type:    corev1.NodeInternalIP,
+					Address: "192.168.1.1",
+				},
+			},
+		},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-2",
+		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{
+					Type:    corev1.NodeInternalIP,
+					Address: "192.168.1.2",
+				},
+			},
+		},
+	}
+
+	// Sample serviceConfig
+	svcConf := &serviceConfig{
+		preferredIPFamily:   corev1.IPv4Protocol,
+		lbMemberSubnetID:    "subnet-12345-test",
+		healthCheckNodePort: 8081,
+	}
+
+	// Instantiate an object of your LbaasV2 struct
+	lbaas := &LbaasV2{}
+
+	testCases := []struct {
+		name                 string
+		nodes                []*corev1.Node
+		port                 corev1.ServicePort
+		svcConf              *serviceConfig
+		expectedLen          int
+		expectError          bool
+		checkNewMembersEmpty bool
+	}{
+		{
+			name:        "NodePort == 0",
+			nodes:       []*corev1.Node{node1, node2},
+			port:        corev1.ServicePort{NodePort: 0},
+			svcConf:     svcConf,
+			expectedLen: 0,
+			expectError: false,
+		},
+		{
+			name:        "ErrNoAddressFound happens for all nodes",
+			nodes:       []*corev1.Node{{}, {}},
+			port:        port,
+			svcConf:     svcConf,
+			expectedLen: 0,
+			expectError: false,
+		},
+		{
+			name:  "Valid nodes, canUseHTTPMonitor=false",
+			nodes: []*corev1.Node{node1, node2},
+			port:  corev1.ServicePort{NodePort: 8080},
+			svcConf: &serviceConfig{
+				preferredIPFamily:   corev1.IPv4Protocol,
+				lbMemberSubnetID:    "subnet-12345-test",
+				healthCheckNodePort: 8081,
+				enableMonitor:       true,
+			},
+			expectedLen: 2,
+			expectError: false,
+		},
+		{
+			name:  "Valid nodes, canUseHTTPMonitor=true",
+			nodes: []*corev1.Node{node1, node2},
+			port:  corev1.ServicePort{NodePort: 8080},
+			svcConf: &serviceConfig{
+				preferredIPFamily:   corev1.IPv4Protocol,
+				lbMemberSubnetID:    "subnet-12345-test",
+				healthCheckNodePort: 8081,
+				enableMonitor:       true,
+			},
+			expectedLen: 2,
+			expectError: false,
+		},
+		{
+			name:        "Valid nodes, NodePort != 0, canUseHTTPMonitor=false",
+			nodes:       []*corev1.Node{node1, node2},
+			port:        port,
+			svcConf:     svcConf,
+			expectedLen: 2,
+			expectError: false,
+		},
+		{
+			name:  "Valid nodes, NodePort != 0, canUseHTTPMonitor=true",
+			nodes: []*corev1.Node{node1, node2},
+			port:  corev1.ServicePort{NodePort: 8080},
+			svcConf: &serviceConfig{
+				preferredIPFamily:   corev1.IPv4Protocol,
+				lbMemberSubnetID:    "subnet-12345-test",
+				healthCheckNodePort: 8081,
+				enableMonitor:       true,
+			},
+			expectedLen: 2,
+			expectError: false,
+		},
+		{
+			name:  "Invalid preferred IP family, fallback to default",
+			nodes: []*corev1.Node{node1, node2},
+			port:  port,
+			svcConf: &serviceConfig{
+				preferredIPFamily:   "invalid-family",
+				lbMemberSubnetID:    "subnet-12345-test",
+				healthCheckNodePort: 8081,
+			},
+			expectedLen: 2,
+			expectError: false,
+		},
+		{
+			name:  "ErrNoAddressFound happens and a member is ignored",
+			nodes: []*corev1.Node{},
+			port:  corev1.ServicePort{NodePort: 8080},
+			svcConf: &serviceConfig{
+				preferredIPFamily:   corev1.IPv4Protocol,
+				lbMemberSubnetID:    "subnet-12345-test",
+				healthCheckNodePort: 8081,
+				enableMonitor:       false,
+			},
+			expectedLen:          1,
+			expectError:          true,
+			checkNewMembersEmpty: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			members, newMembers, err := lbaas.buildBatchUpdateMemberOpts(tc.port, tc.nodes, tc.svcConf)
+
+			if tc.expectError {
+				assert.Error(t, err, "Expected an error")
+				assert.Nil(t, members, "Members should be nil when the function returns an error")
+				assert.Nil(t, newMembers, "NewMembers should be nil when the function returns an error")
+			} else {
+				assert.NoError(t, err, "Expected no error")
+				assert.Len(t, members, tc.expectedLen, "Unexpected number of members")
+
+				if tc.checkNewMembersEmpty {
+					assert.Empty(t, newMembers, "NewMembers should be empty when the function returns no error")
+				} else {
+					assert.NotNil(t, newMembers, "NewMembers should not be nil when the function returns no error")
+				}
+			}
+		})
+	}
+
+}
+
